@@ -204,6 +204,25 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
     const s = bars[0].resetInSeconds;
     assert.ok(s > 2100 && s <= 2160, `got ${s}`);
   });
+  await test('handles real status+reset-only headers (no percentage)', () => {
+    const r = pl.headersToBars({
+      'anthropic-ratelimit-unified-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-reset': '1783136400',
+      'anthropic-ratelimit-unified-7d-status': 'allowed',
+      'anthropic-ratelimit-unified-7d-reset': '1783443600',
+      'anthropic-ratelimit-unified-reset': '1783136400',
+      'anthropic-ratelimit-unified-overage-status': 'rejected',
+    });
+    // two window bars (5h session, 7d weekly); bare 'unified' + overage excluded
+    assert.strictEqual(r.bars.length, 2);
+    assert.strictEqual(r.bars[0].label, 'Current session');
+    assert.strictEqual(r.bars[0].usedPercent, null);
+    assert.strictEqual(r.bars[0].status, 'allowed');
+    assert.ok(r.bars[0].resetAt, 'session reset present');
+    assert.strictEqual(r.bars[1].label, 'Weekly · All models');
+    assert.strictEqual(r.overage, 'rejected');
+  });
   await test('extractToken reads Claude Code oauth json', () => {
     const t = pl.extractToken(JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-x', expiresAt: 1, subscriptionType: 'max' } }));
     assert.strictEqual(t.accessToken, 'sk-ant-oat01-x');

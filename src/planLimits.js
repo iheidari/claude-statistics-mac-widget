@@ -119,6 +119,9 @@ function classify(key) {
 }
 
 // Collapse `anthropic-ratelimit-<key>-<field>` headers into normalized bars.
+// Anthropic's unified headers on subscription plans carry `-status` + `-reset`
+// (and sometimes `-limit`/`-remaining`). When limit/remaining are present we can
+// show a real % bar; otherwise we still surface the window's reset + status.
 function headersToBars(headers) {
   const groups = new Map(); // key -> { limit, remaining, reset, status }
   const raw = {};
@@ -133,21 +136,42 @@ function headersToBars(headers) {
   }
 
   const bars = [];
+  let overage = null;
   for (const [key, g] of groups) {
+    if (key === 'unified') continue; // overall roll-up — redundant with the 5h/7d windows
+    if (/overage/.test(key)) {
+      overage = g.status || null;
+      continue;
+    }
+
     const limit = Number(g.limit);
     const remaining = Number(g.remaining);
     let usedPercent = null;
     if (isFinite(limit) && limit > 0 && isFinite(remaining)) {
       usedPercent = Math.min(100, Math.max(0, Math.round(((limit - remaining) / limit) * 100)));
     }
-    if (usedPercent == null) continue; // nothing meaningful to show for this group
+
+    const hasReset = g.reset != null && g.reset !== '';
+    const status = g.status || null;
+    if (usedPercent == null && !hasReset && !status) continue; // nothing to show
+
     const { resetAt, resetInSeconds } = parseReset(g.reset);
     const { label, order } = classify(key);
-    bars.push({ id: key, label, usedPercent, limit, remaining, resetAt, resetInSeconds, order });
+    bars.push({
+      id: key,
+      label,
+      usedPercent, // null when the API doesn't expose a numeric limit
+      status, // 'allowed' | 'rejected' | null
+      limit: isFinite(limit) ? limit : null,
+      remaining: isFinite(remaining) ? remaining : null,
+      resetAt,
+      resetInSeconds,
+      order,
+    });
   }
 
   bars.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-  return { bars, raw };
+  return { bars, raw, overage };
 }
 
 // ---- Probe ------------------------------------------------------------------
@@ -212,7 +236,7 @@ async function fetchPlanLimits() {
   if (res.error) {
     return { available: false, error: res.error, bars: [], source: cred.source };
   }
-  const { bars, raw } = headersToBars(res.headers || {});
+  const { bars, raw, overage } = headersToBars(res.headers || {});
   if (res.status === 401 || res.status === 403) {
     return {
       available: false,
@@ -227,6 +251,7 @@ async function fetchPlanLimits() {
     available: bars.length > 0,
     error: bars.length ? null : 'no rate-limit headers returned',
     bars,
+    overage,
     raw,
     plan: cred.plan || null,
     source: cred.source,
