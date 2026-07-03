@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-stats.helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE__</string>
+        <string>__CLI__</string>
+        <string>serve</string>
+    </array>
+
+    <!-- Keep the helper alive at login and restart it if it crashes. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__LOGDIR__/helper.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOGDIR__/helper.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLAUDE_STATS_PORT</key>
+        <string>__PORT__</string>
+    </dict>
+</dict>
+</plist>
