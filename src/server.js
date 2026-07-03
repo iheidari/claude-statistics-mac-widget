@@ -4,6 +4,7 @@ const http = require('http');
 const { PORT, HOST } = require('./config');
 const { getStatsCached } = require('./parser');
 const { TelemetryStore } = require('./telemetry/otlpReceiver');
+const { getPlanLimitsCached } = require('./planLimits');
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -68,10 +69,17 @@ function createServer() {
         return;
       }
 
-      // --- Combined stats: parsed files + live telemetry (the widget reads this) ---
+      // --- Combined stats: parsed files + live telemetry + plan limits ---
       if (req.method === 'GET' && pathname === '/stats') {
-        const fileStats = await getStatsCached();
-        sendJson(res, 200, { ...fileStats, telemetry: telemetry.snapshot() });
+        const [fileStats, planLimits] = await Promise.all([getStatsCached(), getPlanLimitsCached()]);
+        sendJson(res, 200, { ...fileStats, telemetry: telemetry.snapshot(), planLimits });
+        return;
+      }
+
+      // Live plan usage limits (session + weekly bars). Undocumented source.
+      if (req.method === 'GET' && pathname === '/limits') {
+        const planLimits = await getPlanLimitsCached();
+        sendJson(res, 200, planLimits);
         return;
       }
 
@@ -84,7 +92,7 @@ function createServer() {
         sendJson(res, 200, {
           ok: true,
           service: 'claude-statistics-mac-widget',
-          endpoints: ['/stats', '/telemetry', '/health', 'POST /v1/metrics'],
+          endpoints: ['/stats', '/telemetry', '/limits', '/health', 'POST /v1/metrics'],
           telemetryPayloads: telemetry.snapshot().payloads,
         });
         return;

@@ -174,6 +174,48 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
   });
   await test('reports availability after ingest', () => assert.strictEqual(snap.available, true));
 
+  console.log('\nPlan limits (header parsing, no network)');
+  const pl = require('../src/planLimits');
+  const future = new Date(Date.now() + 36 * 60 * 1000).toISOString();
+  const { bars } = pl.headersToBars({
+    'anthropic-ratelimit-unified-5h-limit': '100',
+    'anthropic-ratelimit-unified-5h-remaining': '65',
+    'anthropic-ratelimit-unified-5h-reset': future,
+    'anthropic-ratelimit-unified-7d-limit': '1000',
+    'anthropic-ratelimit-unified-7d-remaining': '900',
+    'anthropic-ratelimit-unified-7d-reset': future,
+    'anthropic-ratelimit-unified-7d-opus-limit': '500',
+    'anthropic-ratelimit-unified-7d-opus-remaining': '485',
+    'x-unrelated': 'ignore me',
+  });
+  await test('parses session bar to 35% used', () => {
+    assert.strictEqual(bars[0].label, 'Current session');
+    assert.strictEqual(bars[0].usedPercent, 35);
+  });
+  await test('parses weekly all-models to 10%', () => {
+    assert.strictEqual(bars[1].label, 'Weekly · All models');
+    assert.strictEqual(bars[1].usedPercent, 10);
+  });
+  await test('parses weekly per-model (opus) to 3%', () => {
+    assert.strictEqual(bars[2].label, 'Weekly · Opus');
+    assert.strictEqual(bars[2].usedPercent, 3);
+  });
+  await test('reset seconds computed (~36 min)', () => {
+    const s = bars[0].resetInSeconds;
+    assert.ok(s > 2100 && s <= 2160, `got ${s}`);
+  });
+  await test('extractToken reads Claude Code oauth json', () => {
+    const t = pl.extractToken(JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-x', expiresAt: 1, subscriptionType: 'max' } }));
+    assert.strictEqual(t.accessToken, 'sk-ant-oat01-x');
+    assert.strictEqual(t.plan, 'max');
+  });
+  await test('no credential -> unavailable, no network call', async () => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const res = await pl.fetchPlanLimits();
+    assert.strictEqual(res.available, false);
+    assert.ok(/no Claude Code credential/.test(res.error));
+  });
+
   console.log('\nServer (end to end)');
   const { start } = require('../src/server');
   const { server, port } = await start({ port: 0, host: '127.0.0.1' });
@@ -206,10 +248,19 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
   await test('POST /v1/metrics accepts OTLP json', () => assert.strictEqual(post.status, 200));
 
   const statsRes = await req('GET', '/stats');
-  await test('/stats merges files + telemetry', () => {
+  await test('/stats merges files + telemetry + planLimits', () => {
     assert.ok(statsRes.body.sessions >= 0);
     assert.strictEqual(statsRes.body.telemetry.costUsage, 1.5);
     assert.strictEqual(statsRes.body.telemetry.available, true);
+    assert.ok(statsRes.body.planLimits, 'planLimits present');
+    assert.strictEqual(statsRes.body.planLimits.available, false); // no token in test env
+  });
+
+  const limitsRes = await req('GET', '/limits');
+  await test('/limits degrades safely without a credential', () => {
+    assert.strictEqual(limitsRes.status, 200);
+    assert.strictEqual(limitsRes.body.available, false);
+    assert.ok(Array.isArray(limitsRes.body.bars));
   });
 
   server.close();

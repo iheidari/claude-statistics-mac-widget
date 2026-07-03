@@ -168,6 +168,57 @@ as you work. The widget's status dot turns green when live telemetry is flowing.
 
 ---
 
+## Plan usage limits (live session + weekly bars)
+
+The widget can also show your **plan rate-limit** status — the same bars as
+Claude Code's `/usage` panel: current-session %, weekly (all models) %, and
+per-model weekly %, each with a reset time.
+
+> ⚠️ **This uses an undocumented mechanism.** Anthropic exposes **no official
+> personal-usage API** (the Rate Limits API is org/Admin-only and excludes
+> Pro/Max plans). Like the community tools, the helper reads the OAuth token
+> Claude Code stored, makes **one minimal Messages API request every 60s**, and
+> parses the `anthropic-ratelimit-*` response headers into the bars. It can break
+> if Anthropic changes those headers. **If no token is found, the helper makes no
+> network call at all** and the section simply doesn't appear.
+
+How the token is located (first match wins):
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` env var (a token from `claude setup-token`, or any
+   access token) — set this if you'd rather not have the helper touch Keychain.
+2. **macOS Keychain** — the `Claude Code-credentials` item (macOS may show a
+   one-time "allow access" prompt the first time).
+3. `~/.claude/.credentials.json` (Linux/Windows).
+
+Each 60s refresh makes one tiny authenticated request (Haiku, `max_tokens: 1`) as
+you — negligible quota, but it *is* a real call on your account. Turn the whole
+feature off with `CLAUDE_STATS_PLAN_LIMITS=off`.
+
+Inspect it directly:
+
+```bash
+curl -s http://127.0.0.1:4318/limits | node -e 'process.stdin.on("data",d=>console.log(d.toString()))'
+```
+
+```jsonc
+{
+  "available": true,
+  "plan": "max",
+  "bars": [
+    { "id": "unified-5h",      "label": "Current session",     "usedPercent": 35, "resetInSeconds": 2160 },
+    { "id": "unified-7d",      "label": "Weekly · All models",  "usedPercent": 10, "resetAt": "…" },
+    { "id": "unified-7d-opus", "label": "Weekly · Opus",        "usedPercent": 3,  "resetAt": "…" }
+  ],
+  "source": "keychain"
+}
+```
+
+If the token has expired, the helper reports that (`run any Claude Code command
+to refresh it`) instead of failing silently — it does **not** implement token
+refresh itself.
+
+---
+
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -176,6 +227,10 @@ as you work. The widget's status dot turns green when live telemetry is flowing.
 | `CLAUDE_STATS_PORT` | `4318` | Helper listen port (widget + OTEL must match) |
 | `CLAUDE_STATS_HOST` | `127.0.0.1` | Helper bind address |
 | `CLAUDE_STATS_TTL_MS` | `30000` | File-parse cache lifetime |
+| `CLAUDE_STATS_PLAN_LIMITS` | (on) | Set to `off` to disable live plan-limit probing entirely |
+| `CLAUDE_STATS_LIMITS_TTL_MS` | `60000` | How often to refresh plan limits (one API call per refresh) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Provide the OAuth token yourself instead of reading Keychain |
+| `CLAUDE_STATS_PROBE_MODEL` | `claude-haiku-4-5` | Model used for the tiny rate-limit probe request |
 
 If you change the port, update `PORT` at the top of
 `widget/claude-stats.widget/index.jsx` too.

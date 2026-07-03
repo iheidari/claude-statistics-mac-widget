@@ -68,6 +68,26 @@ export const className = `
     font-size: 11px; color: #9AA0AA;
   }
   .cs-foot .model { color: #C4B5FD; font-weight: 600; }
+
+  .cs-limits { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.07); }
+  .cs-limits-title {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px;
+    color: #9AA0AA; margin-bottom: 10px;
+  }
+  .cs-bar-row { margin-bottom: 11px; }
+  .cs-bar-row:last-child { margin-bottom: 2px; }
+  .cs-bar-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 5px;
+  }
+  .cs-bar-label { font-size: 12px; font-weight: 600; color: #E5E7EB; }
+  .cs-bar-pct { font-size: 11px; color: #9AA0AA; font-variant-numeric: tabular-nums; }
+  .cs-bar-track {
+    height: 6px; border-radius: 4px; background: rgba(255,255,255,0.09); overflow: hidden;
+  }
+  .cs-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+  .cs-bar-reset { font-size: 10px; color: #6B7280; margin-top: 4px; }
+
   .cs-offline { padding: 6px 2px; font-size: 12px; color: #9AA0AA; line-height: 1.5; }
   .cs-offline code { color: #ECECEC; background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; }
 `;
@@ -92,6 +112,29 @@ function hour(h) {
 function shortModel(m) {
   if (!m) return "—";
   return m.replace(/^anthropic\./, "").replace(/-\d{8}$/, "");
+}
+function barColor(pct) {
+  if (pct >= 90) return "#EF4444"; // red
+  if (pct >= 75) return "#FBBF24"; // amber
+  return "#3B82F6"; // blue
+}
+function resetText(bar) {
+  const s = bar.resetInSeconds;
+  if (s != null && s < 86400) {
+    if (s < 3600) return `Resets in ${Math.max(1, Math.round(s / 60))} min`;
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    return `Resets in ${h}h${m ? " " + m + "m" : ""}`;
+  }
+  if (bar.resetAt) {
+    const d = new Date(bar.resetAt);
+    if (!isNaN(d.getTime())) {
+      const day = d.toLocaleDateString("en-US", { weekday: "short" });
+      const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      return `Resets ${day} ${time}`;
+    }
+  }
+  return "";
 }
 
 export const render = ({ output }) => {
@@ -166,6 +209,29 @@ export const render = ({ output }) => {
         <span>{fmt(s.activeDays)} active days</span>
         <span className="model">{shortModel(s.favoriteModel)}</span>
       </div>
+
+      {s.planLimits && s.planLimits.available && s.planLimits.bars.length > 0 && (
+        <div className="cs-limits">
+          <div className="cs-limits-title">
+            Plan usage limits{s.planLimits.plan ? ` · ${s.planLimits.plan}` : ""}
+          </div>
+          {s.planLimits.bars.map((bar) => (
+            <div className="cs-bar-row" key={bar.id}>
+              <div className="cs-bar-head">
+                <span className="cs-bar-label">{bar.label}</span>
+                <span className="cs-bar-pct">{bar.usedPercent}% used</span>
+              </div>
+              <div className="cs-bar-track">
+                <div
+                  className="cs-bar-fill"
+                  style={{ width: `${bar.usedPercent}%`, background: barColor(bar.usedPercent) }}
+                />
+              </div>
+              <div className="cs-bar-reset">{resetText(bar)}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
