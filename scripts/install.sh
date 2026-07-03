@@ -50,16 +50,25 @@ else
 fi
 
 # --- 2. Übersicht widget -----------------------------------------------------
+# The widgets folder is created the first time Übersicht launches. If the user
+# ran this script before launching Übersicht, it won't exist yet — so create it
+# and copy anyway. Übersicht also lets users pick a custom widgets folder; if the
+# widget doesn't show up, use the menu-bar icon → "Open Widgets Folder" and copy
+# claude-stats.widget there instead.
 UB_DIR="$HOME/Library/Application Support/Übersicht/widgets"
-if [[ -d "$UB_DIR" ]]; then
-  cp -R "$REPO_DIR/widget/claude-stats.widget" "$UB_DIR/"
-  echo "==> Widget copied to Übersicht ($UB_DIR)"
-  echo "    Refresh Übersicht (menu bar icon → Refresh All) to see it."
-else
-  echo "==> Übersicht not found at $UB_DIR"
-  echo "    Install Übersicht from https://tracesof.net/uebersicht/ then copy:"
-  echo "      cp -R \"$REPO_DIR/widget/claude-stats.widget\" \"$UB_DIR/\""
+
+# Handle a differently-normalized "Übersicht" folder name if one already exists.
+EXISTING="$(find "$HOME/Library/Application Support" -maxdepth 1 -type d -iname '*bersicht' 2>/dev/null | head -n1 || true)"
+if [[ -n "$EXISTING" ]]; then
+  UB_DIR="$EXISTING/widgets"
 fi
+
+mkdir -p "$UB_DIR"
+rm -rf "$UB_DIR/claude-stats.widget"
+cp -R "$REPO_DIR/widget/claude-stats.widget" "$UB_DIR/"
+echo "==> Widget copied to: $UB_DIR/claude-stats.widget"
+echo "    If Übersicht isn't installed yet, get it at https://tracesof.net/uebersicht/"
+echo "    Then: Übersicht menu-bar icon → Refresh All (widget appears top-left)."
 
 echo
 echo "Done. Next: enable live telemetry with ./scripts/enable-telemetry.sh"
