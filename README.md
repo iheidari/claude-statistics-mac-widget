@@ -174,13 +174,22 @@ The widget can also show your **plan rate-limit** status — the same bars as
 Claude Code's `/usage` panel: current-session %, weekly (all models) %, and
 per-model weekly %, each with a reset time.
 
-> ⚠️ **This uses an undocumented mechanism.** Anthropic exposes **no official
-> personal-usage API** (the Rate Limits API is org/Admin-only and excludes
-> Pro/Max plans). Like the community tools, the helper reads the OAuth token
-> Claude Code stored, makes **one minimal Messages API request every 60s**, and
-> parses the `anthropic-ratelimit-*` response headers into the bars. It can break
-> if Anthropic changes those headers. **If no token is found, the helper makes no
-> network call at all** and the section simply doesn't appear.
+> ⚠️ **This uses an undocumented endpoint.** Anthropic exposes **no official
+> personal-usage API**. The helper reads the OAuth token Claude Code stored and
+> calls the same **undocumented** endpoint Claude Code's own `/usage` panel uses —
+> `GET https://api.anthropic.com/api/oauth/usage` — which returns the actual
+> utilization percentages and reset times. It can change or break without notice.
+> **If no token is found, the helper makes no network call at all** and the
+> section simply doesn't appear.
+
+Two things this endpoint requires (both handled for you):
+
+- **A `claude-code/<version>` User-Agent** — without it the endpoint returns hard
+  `429`s. The helper detects your installed version via `claude --version` and
+  falls back to a default; override with `CLAUDE_STATS_USER_AGENT`.
+- **Slow polling** — it's aggressively rate-limited, so the helper refreshes at
+  most **every 180s** (the enforced floor). This is a usage *query*, so it does
+  **not** consume any message/token quota.
 
 How the token is located (first match wins):
 
@@ -190,9 +199,7 @@ How the token is located (first match wins):
    one-time "allow access" prompt the first time).
 3. `~/.claude/.credentials.json` (Linux/Windows).
 
-Each 60s refresh makes one tiny authenticated request (Haiku, `max_tokens: 1`) as
-you — negligible quota, but it *is* a real call on your account. Turn the whole
-feature off with `CLAUDE_STATS_PLAN_LIMITS=off`.
+Turn the whole feature off with `CLAUDE_STATS_PLAN_LIMITS=off`.
 
 Inspect it directly:
 
@@ -205,13 +212,18 @@ curl -s http://127.0.0.1:4318/limits | node -e 'process.stdin.on("data",d=>conso
   "available": true,
   "plan": "max",
   "bars": [
-    { "id": "unified-5h",      "label": "Current session",     "usedPercent": 35, "resetInSeconds": 2160 },
-    { "id": "unified-7d",      "label": "Weekly · All models",  "usedPercent": 10, "resetAt": "…" },
-    { "id": "unified-7d-opus", "label": "Weekly · Opus",        "usedPercent": 3,  "resetAt": "…" }
+    { "id": "five_hour",        "label": "Current session",     "usedPercent": 35, "resetInSeconds": 2160, "resetAt": "…" },
+    { "id": "seven_day",        "label": "Weekly · All models",  "usedPercent": 10, "resetAt": "…" },
+    { "id": "seven_day_sonnet", "label": "Weekly · Sonnet",      "usedPercent": 3,  "resetAt": "…" }
   ],
+  "overage": "disabled",
   "source": "keychain"
 }
 ```
+
+> If your account/endpoint only returns reset + status without percentages, the
+> bars fall back to showing an **OK / Limit-reached** pill plus the reset
+> countdown instead of a `%`.
 
 If the token has expired, the helper reports that (`run any Claude Code command
 to refresh it`) instead of failing silently — it does **not** implement token
@@ -228,9 +240,9 @@ refresh itself.
 | `CLAUDE_STATS_HOST` | `127.0.0.1` | Helper bind address |
 | `CLAUDE_STATS_TTL_MS` | `30000` | File-parse cache lifetime |
 | `CLAUDE_STATS_PLAN_LIMITS` | (on) | Set to `off` to disable live plan-limit probing entirely |
-| `CLAUDE_STATS_LIMITS_TTL_MS` | `60000` | How often to refresh plan limits (one API call per refresh) |
+| `CLAUDE_STATS_LIMITS_TTL_MS` | `180000` | Plan-limit refresh interval (min 180s — enforced) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Provide the OAuth token yourself instead of reading Keychain |
-| `CLAUDE_STATS_PROBE_MODEL` | `claude-haiku-4-5` | Model used for the tiny rate-limit probe request |
+| `CLAUDE_STATS_USER_AGENT` | `claude-code/<detected>` | User-Agent sent to the usage endpoint |
 
 If you change the port, update `PORT` at the top of
 `widget/claude-stats.widget/index.jsx` too.

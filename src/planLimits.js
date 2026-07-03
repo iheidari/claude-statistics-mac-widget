@@ -16,8 +16,26 @@ const https = require('https');
 const { execFileSync } = require('child_process');
 
 const API_HOST = 'api.anthropic.com';
+const USAGE_PATH = '/api/oauth/usage';
 const OAUTH_BETA = 'oauth-2025-04-20';
-const PROBE_MODEL = process.env.CLAUDE_STATS_PROBE_MODEL || 'claude-haiku-4-5';
+
+// The usage endpoint gates on a claude-code User-Agent — without it you get
+// aggressive 429s. We detect the installed Claude Code version when possible.
+let cachedUserAgent = null;
+function userAgent() {
+  if (process.env.CLAUDE_STATS_USER_AGENT) return process.env.CLAUDE_STATS_USER_AGENT;
+  if (cachedUserAgent) return cachedUserAgent;
+  let version = '2.1.0';
+  try {
+    const out = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/(\d+\.\d+\.\d+)/);
+    if (m) version = m[1];
+  } catch (_) {
+    /* claude not on PATH — fall back to default version */
+  }
+  cachedUserAgent = `claude-code/${version}`;
+  return cachedUserAgent;
+}
 
 // ---- Credential discovery ---------------------------------------------------
 
@@ -174,43 +192,76 @@ function headersToBars(headers) {
   return { bars, raw, overage };
 }
 
-// ---- Probe ------------------------------------------------------------------
+// ---- Usage endpoint ---------------------------------------------------------
 
-function probe(accessToken, timeoutMs = 8000) {
-  const body = JSON.stringify({
-    model: PROBE_MODEL,
-    max_tokens: 1,
-    messages: [{ role: 'user', content: 'hi' }],
-  });
+// GET the undocumented /api/oauth/usage endpoint Claude Code's /usage panel uses.
+// It's a usage *query* (no message tokens billed) and returns actual percentages.
+function fetchUsage(accessToken, timeoutMs = 8000) {
   const options = {
     host: API_HOST,
-    path: '/v1/messages',
-    method: 'POST',
+    path: USAGE_PATH,
+    method: 'GET',
     headers: {
-      'content-type': 'application/json',
-      'content-length': Buffer.byteLength(body),
+      accept: 'application/json',
       authorization: `Bearer ${accessToken}`,
-      'anthropic-version': '2023-06-01',
       'anthropic-beta': OAUTH_BETA,
-      'user-agent': 'claude-statistics-mac-widget',
+      'user-agent': userAgent(), // MANDATORY — without a claude-code UA you get 429s
     },
   };
   return new Promise((resolve) => {
     const req = https.request(options, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') });
-      });
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
     });
     req.on('error', (err) => resolve({ error: String(err && err.message) }));
     req.setTimeout(timeoutMs, () => {
       req.destroy();
-      resolve({ error: 'probe timed out' });
+      resolve({ error: 'usage request timed out' });
     });
-    req.write(body);
     req.end();
   });
+}
+
+function windowBar(id, label, order, w) {
+  if (!w || typeof w !== 'object') return null;
+  const usedPercent = typeof w.utilization === 'number' ? Math.round(w.utilization) : null;
+  const resetAt = w.resets_at || w.resetsAt || null;
+  if (usedPercent == null && !resetAt) return null;
+  const { resetInSeconds } = parseReset(resetAt);
+  return {
+    id,
+    label,
+    usedPercent,
+    status: null,
+    resetAt: resetAt ? new Date(resetAt).toISOString() : null,
+    resetInSeconds,
+    order,
+  };
+}
+
+// Turn the /api/oauth/usage JSON into normalized bars.
+function usageToBars(json) {
+  const bars = [];
+  const push = (id, label, order, w) => {
+    const b = windowBar(id, label, order, w);
+    if (b) bars.push(b);
+  };
+  push('five_hour', 'Current session', 0, json.five_hour);
+  push('seven_day', 'Weekly · All models', 1, json.seven_day);
+  // Per-model weekly windows: seven_day_opus, seven_day_sonnet, seven_day_fable, …
+  for (const key of Object.keys(json)) {
+    const m = /^seven_day_(.+)$/.exec(key);
+    if (!m) continue;
+    const model = m[1];
+    push(key, `Weekly · ${model.charAt(0).toUpperCase()}${model.slice(1)}`, 2, json[key]);
+  }
+  let overage = null;
+  if (json.extra_usage && typeof json.extra_usage === 'object') {
+    overage = json.extra_usage.is_enabled ? 'enabled' : 'disabled';
+  }
+  bars.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  return { bars, overage, raw: json };
 }
 
 // Perform one live fetch. Returns a normalized planLimits object.
@@ -222,34 +273,38 @@ async function fetchPlanLimits() {
   if (!cred) {
     return { available: false, error: 'no Claude Code credential found', bars: [] };
   }
-  if (cred.expiresAt && Number(cred.expiresAt) < Date.now()) {
-    return {
-      available: false,
-      error: 'token expired — run any Claude Code command to refresh it',
-      bars: [],
-      plan: cred.plan || null,
-      source: cred.source,
-    };
-  }
 
-  const res = await probe(cred.accessToken);
+  const res = await fetchUsage(cred.accessToken);
   if (res.error) {
     return { available: false, error: res.error, bars: [], source: cred.source };
   }
-  const { bars, raw, overage } = headersToBars(res.headers || {});
   if (res.status === 401 || res.status === 403) {
     return {
       available: false,
-      error: 'token rejected (' + res.status + ') — run a Claude Code command to refresh',
-      bars,
-      raw,
+      error: 'token rejected (' + res.status + ') — run any Claude Code command to refresh it',
+      bars: [],
       source: cred.source,
     };
   }
+  if (res.status === 429) {
+    return {
+      available: false,
+      error: 'rate limited (429) — usage endpoint polled too fast; backing off',
+      bars: [],
+      source: cred.source,
+    };
+  }
+  let json;
+  try {
+    json = JSON.parse(res.body);
+  } catch (_) {
+    return { available: false, error: 'usage endpoint returned non-JSON (status ' + res.status + ')', bars: [], source: cred.source };
+  }
 
+  const { bars, overage, raw } = usageToBars(json);
   return {
     available: bars.length > 0,
-    error: bars.length ? null : 'no rate-limit headers returned',
+    error: bars.length ? null : 'usage endpoint returned no windows',
     bars,
     overage,
     raw,
@@ -263,7 +318,9 @@ async function fetchPlanLimits() {
 // ---- 60s cache --------------------------------------------------------------
 
 let cache = { value: null, at: 0, inflight: null };
-const TTL_MS = Number(process.env.CLAUDE_STATS_LIMITS_TTL_MS) || 60_000;
+// The /api/oauth/usage endpoint is aggressively rate-limited; ~180s is the safe
+// floor. We enforce that minimum even if a smaller value is configured.
+const TTL_MS = Math.max(180_000, Number(process.env.CLAUDE_STATS_LIMITS_TTL_MS) || 180_000);
 
 async function getPlanLimitsCached(ttl = TTL_MS) {
   const now = Date.now();
@@ -287,6 +344,7 @@ module.exports = {
   getPlanLimitsCached,
   fetchPlanLimits,
   // exported for testing:
+  usageToBars,
   headersToBars,
   parseReset,
   classify,

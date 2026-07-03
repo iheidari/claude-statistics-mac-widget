@@ -223,6 +223,26 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
     assert.strictEqual(r.bars[1].label, 'Weekly · All models');
     assert.strictEqual(r.overage, 'rejected');
   });
+  await test('usageToBars parses /api/oauth/usage JSON (35/10/3)', () => {
+    const future = new Date(Date.now() + 36 * 60 * 1000).toISOString();
+    const { bars, overage } = pl.usageToBars({
+      five_hour: { utilization: 35.0, resets_at: future },
+      seven_day: { utilization: 10.0, resets_at: future },
+      seven_day_opus: { utilization: null, resets_at: null },
+      seven_day_sonnet: { utilization: 3.0, resets_at: future },
+      extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null },
+    });
+    // five_hour + seven_day + seven_day_sonnet (opus is null → dropped)
+    assert.strictEqual(bars.length, 3);
+    assert.strictEqual(bars[0].label, 'Current session');
+    assert.strictEqual(bars[0].usedPercent, 35);
+    assert.ok(bars[0].resetInSeconds > 2100 && bars[0].resetInSeconds <= 2160);
+    assert.strictEqual(bars[1].label, 'Weekly · All models');
+    assert.strictEqual(bars[1].usedPercent, 10);
+    assert.strictEqual(bars[2].label, 'Weekly · Sonnet');
+    assert.strictEqual(bars[2].usedPercent, 3);
+    assert.strictEqual(overage, 'disabled');
+  });
   await test('extractToken reads Claude Code oauth json', () => {
     const t = pl.extractToken(JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-x', expiresAt: 1, subscriptionType: 'max' } }));
     assert.strictEqual(t.accessToken, 'sk-ant-oat01-x');
