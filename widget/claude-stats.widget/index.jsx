@@ -86,6 +86,11 @@ export const className = `
     height: 6px; border-radius: 4px; background: rgba(255,255,255,0.09); overflow: hidden;
   }
   .cs-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+  .cs-time-track {
+    height: 3px; border-radius: 3px; background: rgba(255,255,255,0.06);
+    overflow: hidden; margin-top: 5px;
+  }
+  .cs-time-fill { height: 100%; border-radius: 3px; background: #64748B; transition: width 0.4s ease; }
   .cs-bar-reset { font-size: 10px; color: #6B7280; margin-top: 4px; }
 
   .cs-offline { padding: 6px 2px; font-size: 12px; color: #9AA0AA; line-height: 1.5; }
@@ -117,6 +122,19 @@ function barColor(pct) {
   if (pct >= 90) return "#EF4444"; // red
   if (pct >= 75) return "#FBBF24"; // amber
   return "#3B82F6"; // blue
+}
+// Length of each rate-limit window, so the time bar has a denominator.
+// five_hour → 5h; every seven_day* window → 7 days.
+function windowSeconds(bar) {
+  if (bar.id === "five_hour") return 5 * 3600;
+  if (bar.id && bar.id.indexOf("seven_day") === 0) return 7 * 86400;
+  return null;
+}
+// Fraction of the window still remaining (0–100), from resetInSeconds.
+function timeLeftPercent(bar) {
+  const total = windowSeconds(bar);
+  if (total == null || bar.resetInSeconds == null) return null;
+  return Math.max(0, Math.min(100, (bar.resetInSeconds / total) * 100));
 }
 function resetText(bar) {
   const s = bar.resetInSeconds;
@@ -229,6 +247,11 @@ export const render = ({ output }) => {
                     className="cs-bar-fill"
                     style={{ width: `${bar.usedPercent}%`, background: barColor(bar.usedPercent) }}
                   />
+                </div>
+              )}
+              {timeLeftPercent(bar) != null && (
+                <div className="cs-time-track" title="Time left in this window">
+                  <div className="cs-time-fill" style={{ width: `${timeLeftPercent(bar)}%` }} />
                 </div>
               )}
               <div className="cs-bar-reset">{resetText(bar)}</div>
