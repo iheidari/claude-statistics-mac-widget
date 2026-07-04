@@ -228,6 +228,59 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
     assert.strictEqual(t.accessToken, 'sk-ant-oat01-x');
     assert.strictEqual(t.plan, 'max');
   });
+  await test('runFetch retries once with a fresh token when the endpoint 401s (rotation race)', async () => {
+    // Claude Code rotates the OAuth token on refresh, invalidating the previous
+    // access token server-side immediately. The first keychain read hands us the
+    // stale token (401); the retry re-reads and gets the rotated one (200).
+    let reads = 0;
+    const findCred = () => ({ accessToken: reads++ === 0 ? 'sk-ant-STALE' : 'sk-ant-FRESH', source: 'keychain', plan: 'max' });
+    const seen = [];
+    const fetchUsageFn = async (tok) => {
+      seen.push(tok);
+      if (tok === 'sk-ant-STALE') return { status: 401, body: '' };
+      return { status: 200, body: JSON.stringify({ five_hour: { utilization: 12, resets_at: new Date(Date.now() + 60_000).toISOString() } }) };
+    };
+    const res = await pl.runFetch(findCred, fetchUsageFn);
+    assert.deepStrictEqual(seen, ['sk-ant-STALE', 'sk-ant-FRESH'], 'retried once with the re-read token');
+    assert.strictEqual(res.available, true);
+    assert.strictEqual(res.bars[0].usedPercent, 12);
+  });
+  await test('runFetch does NOT retry when the re-read token is unchanged (no spin)', async () => {
+    const findCred = () => ({ accessToken: 'sk-ant-SAME', source: 'keychain' });
+    const seen = [];
+    const fetchUsageFn = async (tok) => { seen.push(tok); return { status: 401, body: '' }; };
+    const res = await pl.runFetch(findCred, fetchUsageFn);
+    assert.strictEqual(seen.length, 1, 'a genuinely-bad token is not retried');
+    assert.strictEqual(res.available, false);
+    assert.ok(/token rejected \(401\)/.test(res.error));
+  });
+  await test('ttlFor caches transient errors briefly but successes and 429 for the full window', () => {
+    const ok = pl.ttlFor({ available: true, bars: [{}] });
+    const rejected = pl.ttlFor({ available: false, error: 'token rejected (401) — run any Claude Code command to refresh it' });
+    const limited = pl.ttlFor({ available: false, status: 429, error: 'rate limited (429) — usage endpoint polled too fast; backing off' });
+    assert.ok(rejected < ok, 'transient errors expire sooner than successes');
+    assert.strictEqual(limited, ok, '429 keeps the full backoff window');
+  });
+  await test('getPlanLimitsCached does not pin a transient error for the full TTL', async () => {
+    process.env.CLAUDE_STATS_LIMITS_ERROR_TTL_MS = '0'; // errors immediately stale
+    pl._resetCache();
+    let n = 0;
+    const fakeFetch = async () => {
+      n += 1;
+      if (n === 1) return { available: false, error: 'token rejected (401) — run any Claude Code command to refresh it', bars: [], source: 'keychain' };
+      return { available: true, error: null, bars: [{ id: 'five_hour', usedPercent: 5 }], source: 'keychain' };
+    };
+    const a = await pl.getPlanLimitsCached(fakeFetch);
+    assert.strictEqual(a.available, false); // first call: the transient 401
+    const b = await pl.getPlanLimitsCached(fakeFetch);
+    assert.strictEqual(b.available, true); // NOT pinned 180s → re-fetched and recovered
+    assert.strictEqual(n, 2);
+    const c = await pl.getPlanLimitsCached(fakeFetch);
+    assert.strictEqual(c.available, true);
+    assert.strictEqual(n, 2, 'a successful result IS served from cache');
+    delete process.env.CLAUDE_STATS_LIMITS_ERROR_TTL_MS;
+    pl._resetCache();
+  });
   await test('no credential -> unavailable, no network call', async () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     const res = await pl.fetchPlanLimits();
