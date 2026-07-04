@@ -194,30 +194,49 @@ function usageToBars(json) {
   return { bars, overage };
 }
 
-// Perform one live fetch. Returns a normalized planLimits object.
-async function fetchPlanLimits() {
+// Perform one live fetch. Returns a normalized planLimits object. `findCred` and
+// `fetchUsageFn` are injected so the rotation-retry path and failure classification
+// can be tested without a real keychain or network (see test/run.js).
+async function runFetch(findCred, fetchUsageFn) {
   if (process.env.CLAUDE_STATS_PLAN_LIMITS === 'off') {
     return { available: false, error: 'disabled', bars: [] };
   }
-  const cred = findCredential();
+  let cred = findCred();
   if (!cred) {
     return { available: false, error: 'no Claude Code credential found', bars: [] };
   }
-  const fail = (error) => ({ available: false, error, bars: [], source: cred.source });
 
-  const res = await fetchUsage(cred.accessToken);
+  let res = await fetchUsageFn(cred.accessToken);
+
+  // Rotation race: Claude Code owns the keychain credential and rotates the OAuth
+  // token on refresh, which invalidates the PREVIOUS access token server-side
+  // immediately — before its expiresAt. If we happened to read a token that was
+  // just superseded, the endpoint 401s even though the credential looks valid.
+  // Re-read the keychain and retry ONCE, but only if the token actually changed,
+  // so a genuinely-bad token can't spin the endpoint.
+  if (res.status === 401 || res.status === 403) {
+    const fresh = findCred();
+    if (fresh && fresh.accessToken && fresh.accessToken !== cred.accessToken) {
+      cred = fresh;
+      res = await fetchUsageFn(cred.accessToken);
+    }
+  }
+
+  // Carry the HTTP status onto failures too (the success path already does) so the
+  // cache can classify backoff structurally instead of re-parsing the error prose.
+  const fail = (error, status = null) => ({ available: false, error, bars: [], source: cred.source, status });
   if (res.error) return fail(res.error);
   if (res.status === 401 || res.status === 403) {
-    return fail(`token rejected (${res.status}) — run any Claude Code command to refresh it`);
+    return fail(`token rejected (${res.status}) — run any Claude Code command to refresh it`, res.status);
   }
   if (res.status === 429) {
-    return fail('rate limited (429) — usage endpoint polled too fast; backing off');
+    return fail('rate limited (429) — usage endpoint polled too fast; backing off', res.status);
   }
   let json;
   try {
     json = JSON.parse(res.body);
   } catch (_) {
-    return fail(`usage endpoint returned non-JSON (status ${res.status})`);
+    return fail(`usage endpoint returned non-JSON (status ${res.status})`, res.status);
   }
 
   const { bars, overage } = usageToBars(json);
@@ -233,18 +252,44 @@ async function fetchPlanLimits() {
   };
 }
 
-// ---- 180s cache -------------------------------------------------------------
+// Live fetch against the real keychain + network.
+async function fetchPlanLimits() {
+  return runFetch(findCredential, fetchUsage);
+}
+
+// ---- Adaptive cache ---------------------------------------------------------
 
 let cache = { value: null, at: 0, inflight: null };
-// The /api/oauth/usage endpoint is aggressively rate-limited; ~180s is the safe
-// floor. We enforce that minimum even if a smaller value is configured.
+// Success TTL: the /api/oauth/usage endpoint is aggressively rate-limited; ~180s
+// is the safe floor. We enforce that minimum even if a smaller value is configured.
 const TTL_MS = Math.max(180_000, Number(process.env.CLAUDE_STATS_LIMITS_TTL_MS) || 180_000);
 
-async function getPlanLimitsCached(ttl = TTL_MS) {
+// Error TTL: a transient failure (a token-rotation 401/403, a timeout, or "no
+// credential yet") must NOT be pinned for the full 180s — otherwise one blip keeps
+// the widget reporting an error for minutes after the keychain already holds a
+// working token. Re-checking soon is cheap for these. Unlike TTL_MS (frozen at load),
+// this re-reads the env each call so a test can flip CLAUDE_STATS_LIMITS_ERROR_TTL_MS.
+function errorTtlMs() {
+  const v = Number(process.env.CLAUDE_STATS_LIMITS_ERROR_TTL_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 20_000;
+}
+
+// How long a resolved value stays fresh: successes get the full window, and so does
+// a 429 (it means "you polled too fast" — keep backing off). Every other failure is
+// treated as transient and expires quickly. Derived from the value, not stored.
+function ttlFor(value) {
+  if (!value) return 0;
+  if (value.available || value.status === 429) return TTL_MS;
+  return errorTtlMs();
+}
+
+// `_fetch` is injectable so the adaptive-TTL behavior can be tested without a real
+// keychain or network (see test/run.js).
+async function getPlanLimitsCached(_fetch = fetchPlanLimits) {
   const now = Date.now();
-  if (cache.value && now - cache.at < ttl) return cache.value;
+  if (cache.value && now - cache.at < ttlFor(cache.value)) return cache.value;
   if (cache.inflight) return cache.inflight;
-  cache.inflight = fetchPlanLimits()
+  cache.inflight = _fetch()
     .then((value) => {
       cache = { value, at: Date.now(), inflight: null };
       return value;
@@ -252,9 +297,9 @@ async function getPlanLimitsCached(ttl = TTL_MS) {
     // fetchPlanLimits catches all its own failures and always resolves a
     // normalized object, so this .catch is effectively unreachable. It's kept
     // deliberately to mirror the shared memoization shape in parser/index.js
-    // (see CLAUDE.md "Caching") — do not remove it as dead code.
+    // (see CLAUDE.md "Caching") — do not remove it as dead code. The value has no
+    // `status`, so ttlFor treats it as a short-lived error — it never pins the cache.
     .catch((err) => {
-      cache.inflight = null;
       const value = { available: false, error: String((err && err.message) || err), bars: [] };
       cache = { value, at: Date.now(), inflight: null };
       return value;
@@ -262,10 +307,18 @@ async function getPlanLimitsCached(ttl = TTL_MS) {
   return cache.inflight;
 }
 
+// Test hook: drop the memoized value so cache-behavior tests start clean.
+function _resetCache() {
+  cache = { value: null, at: 0, inflight: null };
+}
+
 module.exports = {
   getPlanLimitsCached,
   fetchPlanLimits,
   // exported for testing:
+  runFetch,
+  ttlFor,
+  _resetCache,
   usageToBars,
   parseReset,
   extractToken,
