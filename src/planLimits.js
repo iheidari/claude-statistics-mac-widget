@@ -4,10 +4,11 @@
 //
 // IMPORTANT: this uses an UNDOCUMENTED mechanism. Anthropic exposes no official
 // personal-usage API, so — like the community tools (Claude-Usage-Tracker,
-// Claude-Code-Usage-Monitor) — we read the OAuth token Claude Code stored, make
-// one minimal Messages API request, and parse the `anthropic-ratelimit-*`
-// response headers. It can break if Anthropic changes those headers. If no token
-// is found we make NO network call and simply report the feature as unavailable.
+// Claude-Code-Usage-Monitor) — we read the OAuth token Claude Code stored and
+// GET the same `/api/oauth/usage` endpoint the `/usage` panel uses, which returns
+// per-window utilization percentages. It can break if Anthropic changes that
+// endpoint. If no token is found we make NO network call and simply report the
+// feature as unavailable.
 
 const os = require('os');
 const path = require('path');
@@ -101,9 +102,11 @@ function findCredential() {
   return null;
 }
 
-// ---- Header parsing ---------------------------------------------------------
+// ---- Usage endpoint ---------------------------------------------------------
 
-// Turn a `-reset` header value into { resetAt(ISO), resetInSeconds }.
+// Turn a reset value into { resetAt(ISO), resetInSeconds }. The endpoint returns
+// RFC3339 today, but the source is undocumented — stay defensive and also accept
+// numeric epoch (ms/seconds) and seconds-from-now, whether typed as number or string.
 function parseReset(value) {
   if (value == null) return { resetAt: null, resetInSeconds: null };
   const now = Date.now();
@@ -120,79 +123,6 @@ function parseReset(value) {
   }
   return { resetAt: new Date(ms).toISOString(), resetInSeconds: Math.max(0, Math.round((ms - now) / 1000)) };
 }
-
-// Give a friendly label + ordering weight to a rate-limit group key.
-function classify(key) {
-  const k = key.toLowerCase();
-  const model = (k.match(/opus|sonnet|haiku|fable|mythos/) || [])[0];
-  if (/(^|[-_])(5h|session|unified$)/.test(k) || k === 'unified') {
-    return { label: 'Current session', order: 0 };
-  }
-  if (/7d|weekly|week/.test(k)) {
-    if (model) return { label: `Weekly · ${model[0].toUpperCase()}${model.slice(1)}`, order: 2 };
-    return { label: 'Weekly · All models', order: 1 };
-  }
-  if (model) return { label: `Weekly · ${model[0].toUpperCase()}${model.slice(1)}`, order: 2 };
-  return { label: key, order: 3 };
-}
-
-// Collapse `anthropic-ratelimit-<key>-<field>` headers into normalized bars.
-// Anthropic's unified headers on subscription plans carry `-status` + `-reset`
-// (and sometimes `-limit`/`-remaining`). When limit/remaining are present we can
-// show a real % bar; otherwise we still surface the window's reset + status.
-function headersToBars(headers) {
-  const groups = new Map(); // key -> { limit, remaining, reset, status }
-  const raw = {};
-  for (const [name, value] of Object.entries(headers)) {
-    const m = /^anthropic-ratelimit-(.+)-(limit|remaining|reset|status)$/.exec(name);
-    if (!m) continue;
-    raw[name] = value;
-    const key = m[1];
-    const field = m[2];
-    if (!groups.has(key)) groups.set(key, {});
-    groups.get(key)[field] = value;
-  }
-
-  const bars = [];
-  let overage = null;
-  for (const [key, g] of groups) {
-    if (key === 'unified') continue; // overall roll-up — redundant with the 5h/7d windows
-    if (/overage/.test(key)) {
-      overage = g.status || null;
-      continue;
-    }
-
-    const limit = Number(g.limit);
-    const remaining = Number(g.remaining);
-    let usedPercent = null;
-    if (isFinite(limit) && limit > 0 && isFinite(remaining)) {
-      usedPercent = Math.min(100, Math.max(0, Math.round(((limit - remaining) / limit) * 100)));
-    }
-
-    const hasReset = g.reset != null && g.reset !== '';
-    const status = g.status || null;
-    if (usedPercent == null && !hasReset && !status) continue; // nothing to show
-
-    const { resetAt, resetInSeconds } = parseReset(g.reset);
-    const { label, order } = classify(key);
-    bars.push({
-      id: key,
-      label,
-      usedPercent, // null when the API doesn't expose a numeric limit
-      status, // 'allowed' | 'rejected' | null
-      limit: isFinite(limit) ? limit : null,
-      remaining: isFinite(remaining) ? remaining : null,
-      resetAt,
-      resetInSeconds,
-      order,
-    });
-  }
-
-  bars.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-  return { bars, raw, overage };
-}
-
-// ---- Usage endpoint ---------------------------------------------------------
 
 // GET the undocumented /api/oauth/usage endpoint Claude Code's /usage panel uses.
 // It's a usage *query* (no message tokens billed) and returns actual percentages.
@@ -226,18 +156,11 @@ function fetchUsage(accessToken, timeoutMs = 8000) {
 function windowBar(id, label, order, w) {
   if (!w || typeof w !== 'object') return null;
   const usedPercent = typeof w.utilization === 'number' ? Math.round(w.utilization) : null;
-  const resetAt = w.resets_at || w.resetsAt || null;
-  if (usedPercent == null && !resetAt) return null;
-  const { resetInSeconds } = parseReset(resetAt);
-  return {
-    id,
-    label,
-    usedPercent,
-    status: null,
-    resetAt: resetAt ? new Date(resetAt).toISOString() : null,
-    resetInSeconds,
-    order,
-  };
+  const rawReset = w.resets_at || w.resetsAt || null;
+  if (usedPercent == null && !rawReset) return null;
+  const { resetAt, resetInSeconds } = parseReset(rawReset);
+  // `order` is a sort key only — stripped before serialization (see usageToBars).
+  return { id, label, usedPercent, resetAt, resetInSeconds, order };
 }
 
 // Turn the /api/oauth/usage JSON into normalized bars.
@@ -256,12 +179,19 @@ function usageToBars(json) {
     const model = m[1];
     push(key, `Weekly · ${model.charAt(0).toUpperCase()}${model.slice(1)}`, 2, json[key]);
   }
+  // `overage` reflects whether extra/overage usage is turned on for the account
+  // ('enabled' | 'disabled'). NOTE: this is not the old header-path meaning
+  // ('allowed' | 'rejected', i.e. whether a request was blocked) — the value now
+  // describes a setting, not a per-request outcome.
   let overage = null;
   if (json.extra_usage && typeof json.extra_usage === 'object') {
     overage = json.extra_usage.is_enabled ? 'enabled' : 'disabled';
   }
   bars.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-  return { bars, overage, raw: json };
+  // `order` is internal to the sort above — drop it so it never leaks into the
+  // /stats JSON contract the widget consumes.
+  for (const b of bars) delete b.order;
+  return { bars, overage };
 }
 
 // Perform one live fetch. Returns a normalized planLimits object.
@@ -273,41 +203,29 @@ async function fetchPlanLimits() {
   if (!cred) {
     return { available: false, error: 'no Claude Code credential found', bars: [] };
   }
+  const fail = (error) => ({ available: false, error, bars: [], source: cred.source });
 
   const res = await fetchUsage(cred.accessToken);
-  if (res.error) {
-    return { available: false, error: res.error, bars: [], source: cred.source };
-  }
+  if (res.error) return fail(res.error);
   if (res.status === 401 || res.status === 403) {
-    return {
-      available: false,
-      error: 'token rejected (' + res.status + ') — run any Claude Code command to refresh it',
-      bars: [],
-      source: cred.source,
-    };
+    return fail(`token rejected (${res.status}) — run any Claude Code command to refresh it`);
   }
   if (res.status === 429) {
-    return {
-      available: false,
-      error: 'rate limited (429) — usage endpoint polled too fast; backing off',
-      bars: [],
-      source: cred.source,
-    };
+    return fail('rate limited (429) — usage endpoint polled too fast; backing off');
   }
   let json;
   try {
     json = JSON.parse(res.body);
   } catch (_) {
-    return { available: false, error: 'usage endpoint returned non-JSON (status ' + res.status + ')', bars: [], source: cred.source };
+    return fail(`usage endpoint returned non-JSON (status ${res.status})`);
   }
 
-  const { bars, overage, raw } = usageToBars(json);
+  const { bars, overage } = usageToBars(json);
   return {
     available: bars.length > 0,
     error: bars.length ? null : 'usage endpoint returned no windows',
     bars,
     overage,
-    raw,
     plan: cred.plan || null,
     source: cred.source,
     status: res.status,
@@ -315,7 +233,7 @@ async function fetchPlanLimits() {
   };
 }
 
-// ---- 60s cache --------------------------------------------------------------
+// ---- 180s cache -------------------------------------------------------------
 
 let cache = { value: null, at: 0, inflight: null };
 // The /api/oauth/usage endpoint is aggressively rate-limited; ~180s is the safe
@@ -331,6 +249,10 @@ async function getPlanLimitsCached(ttl = TTL_MS) {
       cache = { value, at: Date.now(), inflight: null };
       return value;
     })
+    // fetchPlanLimits catches all its own failures and always resolves a
+    // normalized object, so this .catch is effectively unreachable. It's kept
+    // deliberately to mirror the shared memoization shape in parser/index.js
+    // (see CLAUDE.md "Caching") — do not remove it as dead code.
     .catch((err) => {
       cache.inflight = null;
       const value = { available: false, error: String((err && err.message) || err), bars: [] };
@@ -345,9 +267,7 @@ module.exports = {
   fetchPlanLimits,
   // exported for testing:
   usageToBars,
-  headersToBars,
   parseReset,
-  classify,
   extractToken,
   findCredential,
 };

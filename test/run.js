@@ -174,55 +174,8 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
   });
   await test('reports availability after ingest', () => assert.strictEqual(snap.available, true));
 
-  console.log('\nPlan limits (header parsing, no network)');
+  console.log('\nPlan limits (/api/oauth/usage parsing, no network)');
   const pl = require('../src/planLimits');
-  const future = new Date(Date.now() + 36 * 60 * 1000).toISOString();
-  const { bars } = pl.headersToBars({
-    'anthropic-ratelimit-unified-5h-limit': '100',
-    'anthropic-ratelimit-unified-5h-remaining': '65',
-    'anthropic-ratelimit-unified-5h-reset': future,
-    'anthropic-ratelimit-unified-7d-limit': '1000',
-    'anthropic-ratelimit-unified-7d-remaining': '900',
-    'anthropic-ratelimit-unified-7d-reset': future,
-    'anthropic-ratelimit-unified-7d-opus-limit': '500',
-    'anthropic-ratelimit-unified-7d-opus-remaining': '485',
-    'x-unrelated': 'ignore me',
-  });
-  await test('parses session bar to 35% used', () => {
-    assert.strictEqual(bars[0].label, 'Current session');
-    assert.strictEqual(bars[0].usedPercent, 35);
-  });
-  await test('parses weekly all-models to 10%', () => {
-    assert.strictEqual(bars[1].label, 'Weekly · All models');
-    assert.strictEqual(bars[1].usedPercent, 10);
-  });
-  await test('parses weekly per-model (opus) to 3%', () => {
-    assert.strictEqual(bars[2].label, 'Weekly · Opus');
-    assert.strictEqual(bars[2].usedPercent, 3);
-  });
-  await test('reset seconds computed (~36 min)', () => {
-    const s = bars[0].resetInSeconds;
-    assert.ok(s > 2100 && s <= 2160, `got ${s}`);
-  });
-  await test('handles real status+reset-only headers (no percentage)', () => {
-    const r = pl.headersToBars({
-      'anthropic-ratelimit-unified-status': 'allowed',
-      'anthropic-ratelimit-unified-5h-status': 'allowed',
-      'anthropic-ratelimit-unified-5h-reset': '1783136400',
-      'anthropic-ratelimit-unified-7d-status': 'allowed',
-      'anthropic-ratelimit-unified-7d-reset': '1783443600',
-      'anthropic-ratelimit-unified-reset': '1783136400',
-      'anthropic-ratelimit-unified-overage-status': 'rejected',
-    });
-    // two window bars (5h session, 7d weekly); bare 'unified' + overage excluded
-    assert.strictEqual(r.bars.length, 2);
-    assert.strictEqual(r.bars[0].label, 'Current session');
-    assert.strictEqual(r.bars[0].usedPercent, null);
-    assert.strictEqual(r.bars[0].status, 'allowed');
-    assert.ok(r.bars[0].resetAt, 'session reset present');
-    assert.strictEqual(r.bars[1].label, 'Weekly · All models');
-    assert.strictEqual(r.overage, 'rejected');
-  });
   await test('usageToBars parses /api/oauth/usage JSON (35/10/3)', () => {
     const future = new Date(Date.now() + 36 * 60 * 1000).toISOString();
     const { bars, overage } = pl.usageToBars({
@@ -242,6 +195,33 @@ process.env.CLAUDE_CONFIG_DIR = tmp;
     assert.strictEqual(bars[2].label, 'Weekly · Sonnet');
     assert.strictEqual(bars[2].usedPercent, 3);
     assert.strictEqual(overage, 'disabled');
+  });
+  await test('usageToBars keeps a bar with utilization but no reset (resetAt null)', () => {
+    const { bars } = pl.usageToBars({ five_hour: { utilization: 42, resets_at: null } });
+    assert.strictEqual(bars.length, 1);
+    assert.strictEqual(bars[0].usedPercent, 42);
+    assert.strictEqual(bars[0].resetAt, null);
+    assert.strictEqual(bars[0].resetInSeconds, null);
+  });
+  await test('usageToBars maps extra_usage.is_enabled -> overage "enabled"', () => {
+    const { overage } = pl.usageToBars({ extra_usage: { is_enabled: true } });
+    assert.strictEqual(overage, 'enabled');
+  });
+  await test('usageToBars does not leak the internal order sort key', () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const { bars } = pl.usageToBars({ five_hour: { utilization: 5, resets_at: future } });
+    assert.ok(!('order' in bars[0]), 'order stripped from serialized bar');
+    assert.ok(!('status' in bars[0]), 'no dead status field on serialized bar');
+  });
+  await test('parseReset accepts RFC3339, epoch seconds, and epoch ms', () => {
+    const iso = pl.parseReset('2030-01-01T00:00:00Z');
+    assert.ok(iso.resetInSeconds > 0 && iso.resetAt.startsWith('2030-01-01'));
+    const secs = pl.parseReset(String(Math.floor(Date.now() / 1000) + 3600));
+    assert.ok(secs.resetInSeconds > 3400 && secs.resetInSeconds <= 3600, `epoch seconds: ${secs.resetInSeconds}`);
+    const ms = pl.parseReset(Date.now() + 3600_000); // numeric epoch ms
+    assert.ok(ms.resetInSeconds > 3400 && ms.resetInSeconds <= 3600, `epoch ms: ${ms.resetInSeconds}`);
+    assert.deepStrictEqual(pl.parseReset(null), { resetAt: null, resetInSeconds: null });
+    assert.deepStrictEqual(pl.parseReset('not-a-date'), { resetAt: null, resetInSeconds: null });
   });
   await test('extractToken reads Claude Code oauth json', () => {
     const t = pl.extractToken(JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-x', expiresAt: 1, subscriptionType: 'max' } }));

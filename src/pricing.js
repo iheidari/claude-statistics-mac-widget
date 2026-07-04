@@ -42,23 +42,26 @@ try {
   overrides = null;
 }
 
-function tableFor() {
-  return overrides && typeof overrides === 'object' ? { ...PRICING, ...overrides } : PRICING;
-}
+const TABLE = overrides && typeof overrides === 'object' ? { ...PRICING, ...overrides } : PRICING;
+const TABLE_KEYS = Object.keys(TABLE);
 
-// Find the price entry whose key is the longest substring of `model`.
+// Find the price entry whose key is the longest substring of `model`. Resolved
+// prices are memoized — a full parse hits this once per distinct model id, but
+// callers invoke it once per usage record (millions across a large history).
+const priceCache = new Map();
 function priceForModel(model) {
   if (!model) return null;
-  const table = tableFor();
   const id = String(model).toLowerCase();
+  if (priceCache.has(id)) return priceCache.get(id);
   let best = null;
   let bestLen = 0;
-  for (const key of Object.keys(table)) {
+  for (const key of TABLE_KEYS) {
     if (id.includes(key) && key.length > bestLen) {
-      best = table[key];
+      best = TABLE[key];
       bestLen = key.length;
     }
   }
+  priceCache.set(id, best);
   return best;
 }
 

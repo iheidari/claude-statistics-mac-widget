@@ -87,12 +87,6 @@ export const className = `
   }
   .cs-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
   .cs-bar-reset { font-size: 10px; color: #6B7280; margin-top: 4px; }
-  .cs-bar-status {
-    font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
-    padding: 1px 7px; border-radius: 999px;
-  }
-  .cs-ok { color: #86EFAC; background: rgba(34,197,94,0.15); }
-  .cs-bad { color: #FCA5A5; background: rgba(239,68,68,0.15); }
 
   .cs-offline { padding: 6px 2px; font-size: 12px; color: #9AA0AA; line-height: 1.5; }
   .cs-offline code { color: #ECECEC; background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; }
@@ -225,13 +219,9 @@ export const render = ({ output }) => {
             <div className="cs-bar-row" key={bar.id}>
               <div className="cs-bar-head">
                 <span className="cs-bar-label">{bar.label}</span>
-                {bar.usedPercent != null ? (
+                {bar.usedPercent != null && (
                   <span className="cs-bar-pct">{bar.usedPercent}% used</span>
-                ) : bar.status ? (
-                  <span className={"cs-bar-status " + (bar.status === "allowed" ? "cs-ok" : "cs-bad")}>
-                    {bar.status === "allowed" ? "OK" : "Limit reached"}
-                  </span>
-                ) : null}
+                )}
               </div>
               {bar.usedPercent != null && (
                 <div className="cs-bar-track">

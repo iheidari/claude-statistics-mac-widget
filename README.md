@@ -221,9 +221,9 @@ curl -s http://127.0.0.1:4318/limits | node -e 'process.stdin.on("data",d=>conso
 }
 ```
 
-> If your account/endpoint only returns reset + status without percentages, the
-> bars fall back to showing an **OK / Limit-reached** pill plus the reset
-> countdown instead of a `%`.
+> Each bar shows its utilization `%` (with a colored fill) and, when the endpoint
+> provides one, a reset countdown. A window with no numeric utilization shows just
+> its reset time.
 
 If the token has expired, the helper reports that (`run any Claude Code command
 to refresh it`) instead of failing silently — it does **not** implement token
