@@ -182,6 +182,17 @@ per-model weekly %, each with a reset time.
 > **If no token is found, the helper makes no network call at all** and the
 > section simply doesn't appear.
 
+Each limit renders as **two stacked bars**, and they fill in different directions:
+
+- **The usage bar** (thick, coloured) — how much of the quota you've *consumed*.
+- **The time bar** (thin, below it) — how much of the rate-limit window has
+  *elapsed*, so both bars fill left-to-right as the window progresses. Empty at
+  the start of a window, full at the reset. The `Resets in …` caption underneath
+  still counts down the time *remaining*.
+
+Reading them together tells you whether you're on pace: usage well ahead of time
+means you're burning quota faster than the window replenishes it.
+
 Two things this endpoint requires (both handled for you):
 
 - **A `claude-code/<version>` User-Agent** — without it the endpoint returns hard

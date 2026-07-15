@@ -130,11 +130,12 @@ function windowSeconds(bar) {
   if (bar.id && bar.id.indexOf("seven_day") === 0) return 7 * 86400;
   return null;
 }
-// Fraction of the window still remaining (0–100), from resetInSeconds.
-function timeLeftPercent(bar) {
+// Fraction of the window already elapsed (0–100), from resetInSeconds.
+function timeElapsedPercent(bar) {
   const total = windowSeconds(bar);
   if (total == null || bar.resetInSeconds == null) return null;
-  return Math.max(0, Math.min(100, (bar.resetInSeconds / total) * 100));
+  const remaining = Math.max(0, Math.min(total, bar.resetInSeconds));
+  return ((total - remaining) / total) * 100;
 }
 function resetText(bar) {
   const s = bar.resetInSeconds;
@@ -249,9 +250,9 @@ export const render = ({ output }) => {
                   />
                 </div>
               )}
-              {timeLeftPercent(bar) != null && (
-                <div className="cs-time-track" title="Time left in this window">
-                  <div className="cs-time-fill" style={{ width: `${timeLeftPercent(bar)}%` }} />
+              {timeElapsedPercent(bar) != null && (
+                <div className="cs-time-track" title="Time elapsed in this window">
+                  <div className="cs-time-fill" style={{ width: `${timeElapsedPercent(bar)}%` }} />
                 </div>
               )}
               <div className="cs-bar-reset">{resetText(bar)}</div>

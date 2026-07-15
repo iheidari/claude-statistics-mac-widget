@@ -14,6 +14,14 @@ node src/cli.js serve     # start the helper HTTP service (default command; npm 
 ./scripts/enable-telemetry.sh # append OTEL env vars to shell rc so Claude Code emits live metrics
 ```
 
+**After editing anything under `widget/claude-stats.widget/`, deploy it without being asked:**
+
+```bash
+cp -R widget/claude-stats.widget "$HOME/Library/Application Support/Übersicht/widgets/"
+```
+
+Übersicht runs the *copy* in its widgets folder, not the repo — an edit here is invisible until copied, so a change that looks broken on screen is usually just undeployed. Übersicht watches that folder and re-renders within a second or two (menu-bar icon → **Refresh All** if it doesn't). Widget-only edits need no helper restart; `./scripts/install.sh` also does this copy, but it reloads the launchd service too, which a JSX change doesn't need.
+
 There is no build step, no linter, and **zero runtime dependencies** — the helper is pure Node.js (>=18, CommonJS). Keep it that way: do not add npm dependencies. The test runner is hand-rolled on `node:assert` (no Jest/Mocha); there is no single-test filter — `test/run.js` runs everything sequentially and exits non-zero on any failure. Add new tests to that file.
 
 **Known non-hermetic tests:** the three "no credential → unavailable" plan-limits tests assume no Claude Code credential exists. On a real dev machine `findCredential()` falls through the env var to the macOS Keychain / `~/.claude/.credentials.json`, finds a live token, and the assertions flip to expecting `available: false` when it's actually `true`. These failures are an environment artifact, not a regression — do not "fix" them by changing `planLimits.js`. A clean run requires an environment with no discoverable credential.
